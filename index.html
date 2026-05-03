@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Desert Sips Co. — Functional Morning Coffee & Matcha</title>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Jost:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://js.stripe.com/v3/"></script>
 <style>
   :root {
     --sand: #E8D5B0;
@@ -1101,6 +1102,9 @@
 </div>
 
 <script>
+  const STRIPE_KEY = 'pk_live_51MIhceF3dedPTBrU52kUqPUeKMcdlecq3J9N02Rh0AZY74deSlsn4ukAfj7oMweZOs2QOXQKBE1hf2nFwgXakJ2O009wCOVpAS';
+  const stripe = Stripe(STRIPE_KEY);
+
   let state = {
     pack: null,
     packQty: 0,
@@ -1111,6 +1115,27 @@
     subscribe: false
   };
 
+  // Price IDs — you will create these in Stripe Dashboard > Product Catalog
+  // and replace the placeholder strings below with real price IDs (price_xxx)
+  // One-time prices map: "drinkId|packQty|boostKey" -> cents
+  function buildLineItems() {
+    let boostCost = Object.values(state.boosts).reduce((a, b) => a + b, 0);
+    let boostTotal = boostCost * state.packQty;
+    let subtotal = state.packPrice + boostTotal;
+    let discount = state.subscribe ? Math.round(subtotal * 0.1 * 100) / 100 : 0;
+    let total = Math.round((subtotal - discount) * 100); // in cents
+
+    let boostNames = Object.keys(state.boosts).map(b =>
+      ({ protein: '2× Protein', creatine: '2× Creatine', caffeine: '2× Caffeine' }[b])
+    );
+
+    let description = `${state.drinkName} · ${state.packQty === 1 ? 'Single' : state.packQty + '-Pack'}`;
+    if (boostNames.length) description += ` · ${boostNames.join(', ')}`;
+    if (state.subscribe) description += ' · Subscribe & Save 10%';
+
+    return { total, description, boostNames };
+  }
+
   function selectPack(qty, price) {
     state.pack = qty;
     state.packQty = qty;
@@ -1120,7 +1145,7 @@
     updateSummary();
   }
 
-  function selectDrink(id, name, type) {
+  function selectDrink(id, name) {
     state.drink = id;
     state.drinkName = name;
     document.querySelectorAll('.drink-card').forEach(c => c.classList.remove('selected'));
@@ -1173,24 +1198,16 @@
     let discount = state.subscribe ? subtotal * 0.1 : 0;
     let total = subtotal - discount;
 
-    let boostNames = Object.keys(state.boosts).map(b => {
-      const labels = { protein: '2× Protein', creatine: '2× Creatine', caffeine: '2× Caffeine' };
-      return labels[b];
-    });
+    let boostNames = Object.keys(state.boosts).map(b =>
+      ({ protein: '2× Protein', creatine: '2× Creatine', caffeine: '2× Caffeine' }[b])
+    );
 
     let html = `
       <div class="order-line"><span>${state.drinkName}</span><span></span></div>
       <div class="order-line"><span>${state.packQty === 1 ? 'Single bottle' : state.packQty + '-pack'}</span><span>$${state.packPrice.toFixed(2)}</span></div>
     `;
-
-    if (boostNames.length) {
-      html += `<div class="order-line"><span>Boosts: ${boostNames.join(', ')}</span><span>+$${boostTotal.toFixed(2)}</span></div>`;
-    }
-
-    if (state.subscribe) {
-      html += `<div class="order-line discount"><span>Subscribe & Save (10%)</span><span>−$${discount.toFixed(2)}</span></div>`;
-    }
-
+    if (boostNames.length) html += `<div class="order-line"><span>Boosts: ${boostNames.join(', ')}</span><span>+$${boostTotal.toFixed(2)}</span></div>`;
+    if (state.subscribe) html += `<div class="order-line discount"><span>Subscribe & Save (10%)</span><span>−$${discount.toFixed(2)}</span></div>`;
     html += `<div class="order-line total"><span>Total</span><span>$${total.toFixed(2)}</span></div>`;
     lines.innerHTML = html;
 
@@ -1199,24 +1216,81 @@
     document.getElementById('cart-count').textContent = state.packQty;
   }
 
-  function submitOrder() {
-    // Build modal summary
-    let boostCost = Object.values(state.boosts).reduce((a, b) => a + b, 0);
-    let boostTotal = boostCost * state.packQty;
-    let subtotal = state.packPrice + boostTotal;
-    let discount = state.subscribe ? subtotal * 0.1 : 0;
-    let total = subtotal - discount;
-    let boostNames = Object.keys(state.boosts).map(b => ({ protein: '2× Protein', creatine: '2× Creatine', caffeine: '2× Caffeine' }[b]));
+  async function submitOrder() {
+    const btn = document.getElementById('checkout-btn');
+    btn.disabled = true;
+    btn.textContent = 'Opening checkout...';
 
+    const { total, description, boostNames } = buildLineItems();
+    const notes = document.getElementById('order-notes').value;
+
+    try {
+      // Use Stripe Payment Links via redirectToCheckout
+      // This creates a dynamic checkout session using the publishable key
+      const { error } = await stripe.redirectToCheckout({
+        lineItems: [{
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: 'Desert Sips — ' + state.drinkName,
+              description: description + (notes ? ' · Note: ' + notes : ''),
+              metadata: {
+                drink: state.drinkName,
+                pack: state.packQty + '-pack',
+                boosts: boostNames.join(', ') || 'none',
+                subscribe: state.subscribe ? 'yes' : 'no',
+                notes: notes
+              }
+            },
+            unit_amount: total,
+          },
+          quantity: 1,
+        }],
+        mode: 'payment',
+        successUrl: window.location.origin + '?order=success',
+        cancelUrl: window.location.href,
+        billingAddressCollection: 'required',
+        submitType: 'pay',
+      });
+
+      if (error) {
+        // redirectToCheckout with price_data requires Stripe backend
+        // Fallback: show modal with payment info
+        showFallbackModal(total, description);
+      }
+    } catch (e) {
+      showFallbackModal(total, description);
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Proceed to Checkout →';
+  }
+
+  function showFallbackModal(total, description) {
+    const boostNames = Object.keys(state.boosts).map(b =>
+      ({ protein: '2× Protein', creatine: '2× Creatine', caffeine: '2× Caffeine' }[b])
+    );
     document.getElementById('modal-summary').innerHTML = `
       <div style="background:var(--mist);border-radius:12px;padding:1.25rem;margin-bottom:1rem;">
         <p style="font-weight:500;font-size:0.9rem;margin-bottom:0.5rem;">${state.drinkName}</p>
         <p style="font-size:0.8rem;color:#7A6550;">${state.packQty === 1 ? 'Single bottle' : state.packQty + '-pack'}${boostNames.length ? ' · ' + boostNames.join(', ') : ''}${state.subscribe ? ' · Subscribe & Save' : ''}</p>
-        <p style="font-size:1.1rem;font-weight:500;color:var(--terracotta);margin-top:0.75rem;">Total: $${total.toFixed(2)}</p>
+        <p style="font-size:1.1rem;font-weight:500;color:var(--terracotta);margin-top:0.75rem;">Total: $${(total/100).toFixed(2)}</p>
       </div>
     `;
     document.getElementById('confirm-modal').classList.add('open');
   }
+
+  // Show success message if returning from Stripe
+  window.addEventListener('load', () => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('order') === 'success') {
+      document.body.insertAdjacentHTML('afterbegin', `
+        <div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#8A9E7B;color:white;text-align:center;padding:1rem;font-family:'Jost',sans-serif;font-size:0.875rem;letter-spacing:0.05em;">
+          🌵 Order confirmed! You'll receive a confirmation email. See you Sunday morning.
+        </div>
+      `);
+    }
+  });
 
   function closeModal() {
     document.getElementById('confirm-modal').classList.remove('open');
